@@ -100,6 +100,12 @@ var orderService = {
         filterQuery["meta.customer_name"] = {
           $in: req.query.stores.split(","),
         };
+      if (
+        !!req.query.label_printed &&
+        (req.query.label_printed === "true" ||
+          req.query.label_printed === "false")
+      )
+        filterQuery["label_printed"] = req.query.label_printed === "true";
 
       let count = await dbHandler.count("interim_orders", filterQuery);
 
@@ -134,7 +140,10 @@ var orderService = {
       try {
         let response = await dbHandler
           .get("interim_orders", {
-            "order.reference_id": { $regex: req.query.reference_id },
+            $or: [
+              { "order.reference_id": { $regex: req.query.reference_id } },
+              { "meta.order_number": { $regex: req.query.reference_id } },
+            ],
             merchant_id: monk.id(req.merchant._id),
           })
           .catch();
@@ -160,6 +169,21 @@ var orderService = {
       store: { display_name: "Store Name", data: customer_names },
     };
     responseHandler.sendSuccessWithBody(res, filters);
+  },
+  markLabelPrinted: async (req, res) => {
+    if (!!req.body._id) {
+      let order = await dbHandler.modify(
+        "interim_orders",
+        { _id: req.body._id },
+        { label_printed: true }
+      );
+      if (!!order) {
+        responseHandler.sendSuccessWithBody(res, {
+          _id: order._id,
+          updated_At: order._updated_at,
+        });
+      }
+    } else responseHandler.sendBadRequestError(res);
   },
 };
 

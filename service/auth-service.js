@@ -32,5 +32,21 @@ var authService = {
       }
     );
   },
+  introspect: async (req, res) => {
+    try {
+      let merchant = await dbHandler.getOne(
+        "merchants",
+        {
+          _id: req.merchant._id,
+        },
+        { projection: { password: 0, config: 0 } }
+      );
+      if (!!merchant) {
+        responseHandler.sendSuccessWithBody(res, merchant);
+      }
+    } catch (err) {
+      responseHandler.sendBadRequestError(res);
+    }
+  },
 };
 module.exports = authService;
