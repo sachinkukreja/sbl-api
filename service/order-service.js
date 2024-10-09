@@ -2,7 +2,15 @@ const { default: axios, AxiosError } = require("axios");
 const dbHandler = require("../handlers/databaseHandler");
 const responseHandler = require("../handlers/responseHandler");
 var monk = require("monk");
-const { convertToSeoFriendlytag } = require("../utils");
+const fs = require("fs");
+const AWS = require("aws-sdk");
+const path = require("path");
+const {
+  AWS_ACCESS_KEY_ID,
+  AWS_SECRET_ACCESS_KEY,
+  SB_CREATE_ORDER_URI,
+} = require("../config");
+
 // const puppeteer = require("puppeteer");
 var orderService = {
   createOrder: async (req, res) => {
@@ -28,7 +36,7 @@ var orderService = {
           try {
             let response = await axios({
               method: "post",
-              url: " https://gateway-stage.shipbob.dev/experimental/order/transportation",
+              url: SB_CREATE_ORDER_URI,
               data: {
                 ...requiredOrderDetails.order,
               },
@@ -69,6 +77,86 @@ var orderService = {
           response.shipment_id = interim_order.shipment_id;
 
         if (!!insertedOrder) {
+          responseHandler.sendSuccessWithBody(res, response);
+        } else responseHandler.sendBadRequestError(res, {});
+      } catch (error) {
+        if (!!error.name && error.name === "MongoError") {
+          if (error.code === 11000)
+            responseHandler.sendBadRequestError(res, {
+              errors: [
+                `An order with refernce_id ${requiredOrderDetails.order.reference_id} already exists`,
+              ],
+            });
+          else
+            responseHandler.sendBadRequestError(res, {
+              errors: [error.message],
+            });
+        } else responseHandler.sendBadRequestError(res, error);
+      }
+    }
+  },
+  createLabel: async (req, res) => {
+    let requiredOrderDetails = validateNewOrderRequest(req.body, res);
+    if (!!requiredOrderDetails) {
+      var interim_order = {
+        merchant_id: "",
+        label_printed: false,
+        shipment_id: 0,
+        sb_created: false,
+        sb_created_At: "",
+        ...requiredOrderDetails,
+      };
+
+      try {
+        let merchant = await dbHandler.getOne("merchants", {
+          _id: req.merchant._id,
+        });
+
+        interim_order.merchant_id = merchant._id;
+        try {
+          let response = await axios({
+            method: "post",
+            url: SB_CREATE_ORDER_URI,
+            data: {
+              ...requiredOrderDetails.order,
+            },
+            headers: {
+              Authorization: `Bearer ${merchant.config.sb_PAT}`,
+              shipbob_channel_id: `${merchant.config.sb_channel_id}`,
+            },
+          });
+          let shipment_id =
+            !!response.data && !!response.data.shipment_id
+              ? response.data.shipment_id
+              : 0;
+          interim_order.shipment_id = shipment_id;
+          interim_order.sb_created_At = new Date().toISOString();
+          interim_order.sb_created = true;
+        } catch (err) {
+          if (err instanceof AxiosError)
+            responseHandler.sendCustomStatusCodeWithBody(
+              res,
+              err.status,
+              err.response?.data
+            );
+          else responseHandler.sendBadRequestError(res);
+
+          return;
+        }
+        let insertedOrder = await dbHandler.insert(
+          "interim_orders",
+          interim_order
+        );
+        let response = {
+          interim_order_id: insertedOrder._id,
+          reference_id: insertedOrder.order.reference_id,
+        };
+        if (!!interim_order.shipment_id)
+          response.shipment_id = interim_order.shipment_id;
+
+        if (!!insertedOrder) {
+          let label_url = await uploadtoS3(insertedOrder);
+          response.label = label_url;
           responseHandler.sendSuccessWithBody(res, response);
         } else responseHandler.sendBadRequestError(res, {});
       } catch (error) {
@@ -210,19 +298,99 @@ const validateNewOrderRequest = (order_request, res) => {
   return { meta, order };
 };
 
-const buildFilterQuery = (filters, filterQuery) => {
-  let _filters = filters.split("$");
-  _filters.map((filter) => {
-    if (filter.length > 0) {
-      let filterObjects = filter.split(":");
-      if (filterObjects.length > 1) {
-        if (filterObjects[0] === "store")
-          filterQuery["meta.customer_name"] = { $in: ["Mongo"] };
-      }
-    }
+const uploadtoS3 = async (order) => {
+  const labelFilePath = path.join(
+    __dirname,
+    "..",
+    "labels",
+    `${order._id}.zpl`
+  );
+  AWS.config.update({
+    region: "us-east-1",
+    accessKeyId: AWS_ACCESS_KEY_ID,
+    secretAccessKey: AWS_SECRET_ACCESS_KEY,
   });
-  return filterQuery;
+  const s3 = new AWS.S3();
+
+  return new Promise(async (resolve, reject) => {
+    let sb_created_At = getFormattedDate(order.sb_created_At);
+    let zpl = `^XA
+    ^FX Top section with logo, name and address.
+    ^CF0,60
+    ^FO50,50^GFA,1023,1023,11,,O01F8,O07FE,N01IF8,N07IFE,N0KF,M03KFC,M0MF,L03MFC,L0OF,K01OF8,K07OFE,J01QF8,J07QFC,J0LF0KFC,I03KFC03JFE,I0LF801JFE,003KFEI07IFE,00LF8I01IFE,01KFEK07FFC,07KFCK03FFC,1LFM0FF803F8,3KFCM03E00FFC,7KFQ01FFE,7JFCQ07FFE,KF8P01JF,JFEQ07JF,KF8O01KF,7JFCO03KF,7KFO0LF,3KFCM03LF,1LFM0MF,07KF8K01MF,01KFEK07MF,00LF8I01NF,003KFEI07NF,I0LF801OF,I03KFC03KFDIF,I01LF0LF9IF,J07QFE1IF,J01QF81IF,1FC007OFE01IF,3FE001OF801IF,7FFI0OF001IF,7FFI03MFC001IF,IF8I0MFI01IF,IF8I03KFCI01IF,IF8I01KF8I01IF,IF8J07IFEJ01IF,IF8J01IF8J01IF,IF8K07FEK01IF,IF8K01F8K01IF,IF8S01IF,::::::::::IFCS03IF,IFES07IF,JF8Q01JF,JFEQ07JF,KF8O01KF,7JFCO03JFE,7KFO0KFE,3KFCM03KFC,1LFM0LF8,07KF8K01KFE,01KFEK07KF8,00LF8I01LF,003KFEI07KFC,I0LF801LF,I03KFC03KFC,J0LF0LF,J07QFE,J01QF8,K07OFE,K01OF8,L0OF,L03MFC,M0MF,M03KFC,N0KF,N07IFE,N01IF8,O07FE,O01F8,,^FS
+    ^FO220,50^FDShipBob Logistics^FS
+    ^CF0,30
+    ^FO220,115^FD5900 W Ogden Ave^FS
+    ^FO220,155^FDCicero IL 60804^FS
+    ^FO220,195^FDUnited States (USA)^FS
+    ^FO50,250^GB700,3,3^FS
+    
+    ^FX Second section with recipient address and permit information.
+    
+    ^FO50,300^FD${order.order.recipient.name}^FS
+    ^FO50,340^FD${order.order.recipient.address.address1}^FS
+    ^FO50,380^FD${order.order.recipient.address.address2}^FS
+    ^FO50,420^FD${order.order.recipient.address.city} ${order.order.recipient.address.state} ${order.order.recipient.address.zip_code}^FS
+    ^FO50,460^FD${order.order.recipient.address.country}^FS
+    
+    ^FO50,520^GB700,3,3^FS
+    
+    ^FX Third section with bar code.
+    ^BY5,2,270
+    ^FO70,550^BC^FD${order.shipment_id}^FS
+    
+    ^FX Fourth section (the two boxes on the bottom).
+    ^FO50,900^GB700,250,3^FS
+    ^FO400,900^GB3,250,3^FS
+    ^CF0,20
+    ^FO75,940^FD^FS
+    ^FO75,990^FDShipment ID: ${order.shipment_id}^FS
+    ^FO75,1040^FDOrder Number: ${order.meta.order_number}^FS
+    ^FO75,1090^FDOrder Date: ${sb_created_At}^FS
+    ^CF0,190
+    ^FO470,955
+    ^BQN,2,10
+    ^FDQA,${order.shipment_id}^FS
+    ^FS
+    
+    ^FO470,650
+    ^BQN,2,10
+    ^FDQA,${order.shipment_id}^FS
+    
+    ^XZ`;
+    await fs.promises.writeFile(labelFilePath, zpl);
+
+    const params = {
+      Bucket: "sb-labels",
+      Key: `${order._id}.zpl`,
+      Body: fs.createReadStream(labelFilePath),
+    };
+
+    s3.upload(params, async (err, data) => {
+      if (err) {
+        reject(err);
+      } else {
+        await fs.promises.unlink(path.join(labelFilePath));
+        delete params.Body;
+        params.Expires = 604800;
+        let signedUrl = await s3.getSignedUrlPromise("getObject", params);
+        resolve(signedUrl);
+      }
+    });
+  });
 };
+function getFormattedDate(_date) {
+  let date = new Date(_date);
+  var year = date.getFullYear();
+
+  var month = (1 + date.getMonth()).toString();
+  month = month.length > 1 ? month : "0" + month;
+
+  var day = date.getDate().toString();
+  day = day.length > 1 ? day : "0" + day;
+
+  return month + "/" + day + "/" + year;
+}
 
 module.exports = orderService;
 

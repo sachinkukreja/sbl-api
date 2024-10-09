@@ -11,4 +11,6 @@ module.exports = function (app) {
   app.put("/api/order[:]marklabelprinted", orderService.markLabelPrinted);
   app.get("/api/order[:]search", orderService.searchOrders);
   app.get("/api/order[:]getFilters", orderService.getOrderFilters);
+
+  app.post("/api/order[:]createLabel", orderService.createLabel);
 };
