@@ -13,4 +13,6 @@ module.exports = function (app) {
   app.get("/api/order[:]getFilters", orderService.getOrderFilters);
 
   app.post("/api/order[:]createLabel", orderService.createLabel);
+
+  app.post("/api/picklist", orderService.generatePickList);
 };

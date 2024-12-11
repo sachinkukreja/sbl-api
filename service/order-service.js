@@ -1,4 +1,4 @@
-const { default: axios, AxiosError } = require("axios");
+const { default: axios, AxiosError, Axios } = require("axios");
 const dbHandler = require("../handlers/databaseHandler");
 const responseHandler = require("../handlers/responseHandler");
 var monk = require("monk");
@@ -155,7 +155,10 @@ var orderService = {
           response.shipment_id = interim_order.shipment_id;
 
         if (!!insertedOrder) {
-          let label_url = await uploadtoS3(insertedOrder);
+          let isPDF =
+            !!req.headers["label-type"] &&
+            req.headers["label-type"] === "application/pdf";
+          let label_url = await uploadtoS3(insertedOrder, isPDF);
           response.label = label_url;
           responseHandler.sendSuccessWithBody(res, response);
         } else responseHandler.sendBadRequestError(res, {});
@@ -273,6 +276,46 @@ var orderService = {
       }
     } else responseHandler.sendBadRequestError(res);
   },
+  generatePickList: async (req, res) => {
+    let orders = !!req.body.orders ? req.body.orders : [];
+    if (!!orders && orders.length > 0) {
+      let interim_orders = await dbHandler.aggregate("interim_orders", [
+        {
+          $match: {
+            merchant_id: monk.id(req.merchant._id),
+            "order.reference_id": { $in: orders },
+          },
+        },
+        {
+          $unwind: {
+            path: "$order.products",
+          },
+        },
+        {
+          $group: {
+            _id: {
+              sku: "$order.products.sku",
+            },
+            name: {
+              $last: "$order.products.name",
+            },
+            quantity: {
+              $sum: "$order.products.quantity",
+            },
+          },
+        },
+        {
+          $project: {
+            _id: 0,
+            sku: "$_id.sku",
+            name: 1,
+            quantity: 1,
+          },
+        },
+      ]);
+      responseHandler.sendSuccessWithBody(res, interim_orders);
+    } else responseHandler.sendBadRequestError(res);
+  },
 };
 
 const validateNewOrderRequest = (order_request, res) => {
@@ -298,13 +341,9 @@ const validateNewOrderRequest = (order_request, res) => {
   return { meta, order };
 };
 
-const uploadtoS3 = async (order) => {
-  const labelFilePath = path.join(
-    __dirname,
-    "..",
-    "labels",
-    `${order._id}.zpl`
-  );
+const uploadtoS3 = async (order, isPDF) => {
+  let fileFormat = order._id + (!!isPDF ? ".pdf" : ".zpl");
+  const labelFilePath = path.join(__dirname, "..", "labels", fileFormat);
   AWS.config.update({
     region: "us-east-1",
     accessKeyId: AWS_ACCESS_KEY_ID,
@@ -358,11 +397,26 @@ const uploadtoS3 = async (order) => {
     ^FDQA,${order.shipment_id}^FS
     
     ^XZ`;
-    await fs.promises.writeFile(labelFilePath, zpl);
+
+    let pdf = zpl;
+    if (!!isPDF) {
+      pdf = await axios({
+        method: "post",
+        url: "http://api.labelary.com/v1/printers/8dpmm/labels/4x6",
+        data: zpl,
+        headers: {
+          Accept: "application/pdf",
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        responseType: "arraybuffer",
+      });
+    }
+
+    await fs.promises.writeFile(labelFilePath, !!isPDF ? pdf.data : zpl);
 
     const params = {
       Bucket: "sb-labels",
-      Key: `${order._id}.zpl`,
+      Key: fileFormat,
       Body: fs.createReadStream(labelFilePath),
     };
 
@@ -379,7 +433,11 @@ const uploadtoS3 = async (order) => {
     });
   });
 };
-function getFormattedDate(_date) {
+
+const createSbOrder = async (order) => {
+  return new Promise((resolve, reject) => {});
+};
+const getFormattedDate = (_date) => {
   let date = new Date(_date);
   var year = date.getFullYear();
 
@@ -390,7 +448,7 @@ function getFormattedDate(_date) {
   day = day.length > 1 ? day : "0" + day;
 
   return month + "/" + day + "/" + year;
-}
+};
 
 module.exports = orderService;
 
