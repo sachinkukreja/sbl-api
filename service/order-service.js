@@ -32,6 +32,7 @@ var orderService = {
 
         interim_order.merchant_id = merchant._id;
 
+        //check if we should create an order on Shipbob
         if (!!merchant.config && !!merchant.config.create_order_on_import) {
           try {
             let response = await axios({
@@ -79,6 +80,48 @@ var orderService = {
         if (!!insertedOrder) {
           responseHandler.sendSuccessWithBody(res, response);
         } else responseHandler.sendBadRequestError(res, {});
+      } catch (error) {
+        if (!!error.name && error.name === "MongoError") {
+          if (error.code === 11000)
+            responseHandler.sendBadRequestError(res, {
+              errors: [
+                `An order with refernce_id ${requiredOrderDetails.order.reference_id} already exists`,
+              ],
+            });
+          else
+            responseHandler.sendBadRequestError(res, {
+              errors: [error.message],
+            });
+        } else responseHandler.sendBadRequestError(res, error);
+      }
+    }
+  },
+  modifyOrder: async (req, res) => {
+    let requiredOrderDetails = validateNewOrderRequest(req.body, res);
+    if (!!requiredOrderDetails) {
+      let modified_order = {
+        ...requiredOrderDetails,
+        ...req.body,
+      };
+      delete modified_order._id;
+      delete modified_order.merchant_id;
+      delete modified_order._created_at;
+      try {
+        let modifiedOrder = await dbHandler.modify(
+          "interim_orders",
+          {
+            _id: monk.id(req.body._id),
+            merchant_id: monk.id(req.merchant._id),
+          },
+          modified_order
+        );
+
+        if (!!modifiedOrder) {
+          responseHandler.sendSuccessWithBody(res, modifiedOrder);
+        } else {
+          console.log("err", modifiedOrder);
+          responseHandler.sendBadRequestError(res, {});
+        }
       } catch (error) {
         if (!!error.name && error.name === "MongoError") {
           if (error.code === 11000)
@@ -200,10 +243,16 @@ var orderService = {
 
       let count = await dbHandler.count("interim_orders", filterQuery);
 
+      let sortQueryParam = !!req.query.sort ? JSON.parse(req.query.sort) : {};
+
+      let sortQueryDB = !!sortQueryParam
+        ? { ...sortQueryParam, _created_at: -1 }
+        : { _created_at: -1 };
+
       let data = await dbHandler.get("interim_orders", filterQuery, {
         limit: page_size,
         skip: (page - 1) * page_size,
-        sort: { _created_at: -1 },
+        sort: sortQueryDB,
       });
       responseHandler.sendSuccessWithBody(res, { orders: data, count });
     } catch (error) {
@@ -227,13 +276,25 @@ var orderService = {
       });
   },
   searchOrders: async (req, res) => {
-    if (!!req.query && !!req.query.reference_id) {
+    if (!!req.query && !!req.query.search_term) {
       try {
         let response = await dbHandler
           .get("interim_orders", {
             $or: [
-              { "order.reference_id": { $regex: req.query.reference_id } },
-              { "meta.order_number": { $regex: req.query.reference_id } },
+              { "order.reference_id": { $regex: req.query.search_term } },
+              { "meta.order_number": { $regex: req.query.search_term } },
+              {
+                "order.recipient.name": {
+                  $regex: req.query.search_term,
+                  $options: "i",
+                },
+              },
+              {
+                "meta.customer_name": {
+                  $regex: req.query.search_term,
+                  $options: "i",
+                },
+              },
             ],
             merchant_id: monk.id(req.merchant._id),
           })
